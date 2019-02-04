@@ -3,8 +3,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Eigen/Geometry>
@@ -18,8 +20,9 @@ namespace voxelized_geometry_tools
 {
 namespace pointcloud_voxelization
 {
-OpenCLPointCloudVoxelizer::OpenCLPointCloudVoxelizer()
-    : interface_(opencl_helpers::MakeHelperInterface())
+OpenCLPointCloudVoxelizer::OpenCLPointCloudVoxelizer(
+    const std::map<std::string, int32_t>& options)
+    : interface_(opencl_helpers::MakeHelperInterface(options))
 {
   if (!interface_->IsAvailable())
   {
@@ -68,6 +71,7 @@ CollisionMap OpenCLPointCloudVoxelizer::VoxelizePointClouds(
     const int32_t num_z_cells =
         static_cast<int32_t>(static_environment.GetNumZCells());
     // Do raycasting of the pointclouds
+#pragma omp parallel for
     for (size_t idx = 0; idx < pointclouds.size(); idx++)
     {
       const PointCloudWrapperPtr& pointcloud = pointclouds.at(idx);
@@ -96,13 +100,9 @@ CollisionMap OpenCLPointCloudVoxelizer::VoxelizePointClouds(
         filter_options.OutlierPointsThreshold();
     const int32_t num_cameras_seen_free =
         filter_options.NumCamerasSeenFree();
-    const bool ok = interface_->PrepareFilterGrid(
-            static_environment.GetTotalCells(),
-            static_environment.GetImmutableRawData().data());
-    if (!ok)
-    {
-      throw std::runtime_error("Failed to allocate device filter grid");
-    }
+    interface_->PrepareFilterGrid(
+        static_environment.GetTotalCells(),
+        static_environment.GetImmutableRawData().data());
     interface_->FilterTrackingGrids(
         static_environment.GetTotalCells(),
         static_cast<int32_t>(pointclouds.size()), percent_seen_free,

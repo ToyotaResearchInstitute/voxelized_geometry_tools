@@ -4,6 +4,12 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <cstdint>
+#include <map>
+#include <iostream>
+#include <string>
+#include <vector>
+
 namespace voxelized_geometry_tools
 {
 namespace pointcloud_voxelization
@@ -143,8 +149,8 @@ void RaycastPoint(
 
 __global__
 void FilterGrids(
-    const int64_t num_cells, const int32_t num_device_tracking_grids,
-    int32_t* const* device_tracking_grid_ptrs,
+    const int64_t num_cells, const int32_t num_grids,
+    const int32_t* const device_tracking_grids_ptr,
     float* const device_filter_grid_ptr, const float percent_seen_free,
     const int32_t outlier_points_threshold, const int32_t num_cameras_seen_free)
 {
@@ -158,10 +164,10 @@ void FilterGrids(
     {
       int32_t cameras_seen_filled = 0;
       int32_t cameras_seen_free = 0;
-      for (int32_t idx = 0; idx < num_device_tracking_grids; idx++)
+      for (int32_t idx = 0; idx < num_grids; idx++)
       {
-        int32_t* const device_tracking_grid_ptr =
-            device_tracking_grid_ptrs[idx];
+        const int32_t* const device_tracking_grid_ptr =
+            device_tracking_grids_ptr + (idx * num_cells * 2);
         const int32_t free_count = device_tracking_grid_ptr[voxel_index * 2];
         const int32_t filled_count =
             device_tracking_grid_ptr[(voxel_index * 2) + 1];
@@ -209,157 +215,228 @@ void FilterGrids(
   }
 }
 
-float* PreparePointCloud(const int32_t num_points, const float* points)
+int32_t RetrieveOptionOrDefault(
+    const std::map<std::string, int32_t>& options, const std::string& option,
+    const int32_t default_value)
 {
-  const size_t points_size = sizeof(float) * num_points * 3;
-  float* device_points_ptr = nullptr;
-  cudaMalloc(&device_points_ptr, points_size);
-  CudaCheckErrors("Failed to allocate device points");
-  cudaMemcpy(device_points_ptr, points, points_size,
-             cudaMemcpyHostToDevice);
-  CudaCheckErrors("Failed to memcpy the points to the device");
-  return device_points_ptr;
-}
-
-int32_t* PrepareTrackingGrid(const int64_t num_cells)
-{
-  const size_t tracking_grid_size = sizeof(int32_t) * num_cells * 2;
-  int32_t* device_tracking_grid_ptr = nullptr;
-  cudaMalloc(&device_tracking_grid_ptr, tracking_grid_size);
-  CudaCheckErrors("Failed to allocate device tracking grid");
-  cudaMemset(device_tracking_grid_ptr, 0, tracking_grid_size);
-  CudaCheckErrors("Failed to zero device tracking grid");
-  return device_tracking_grid_ptr;
-}
-
-void RaycastPoints(
-    const float* const device_points_ptr, const int32_t num_points,
-    const float* const pointcloud_origin_transform,
-    const float* const inverse_grid_origin_transform,
-    const float inverse_step_size, const float inverse_cell_size,
-    const int32_t num_x_cells, const int32_t num_y_cells,
-    const int32_t num_z_cells, int32_t* const device_tracking_grid_ptr)
-{
-  // Copy pointcloud origin transform
-  const size_t transform_size = sizeof(float) * 16;
-  float* device_pointcloud_origin_transform_ptr = nullptr;
-  cudaMalloc(&device_pointcloud_origin_transform_ptr, transform_size);
-  CudaCheckErrors("Failed to allocate device pointcloud origin transform");
-  cudaMemcpy(
-      device_pointcloud_origin_transform_ptr, pointcloud_origin_transform,
-      transform_size, cudaMemcpyHostToDevice);
-  CudaCheckErrors("Failed to memcpy the pointcloud origin transform");
-  // Copy grid inverse origin transform
-  float* device_tracking_grid_inverse_origin_transform_ptr = nullptr;
-  cudaMalloc(
-      &device_tracking_grid_inverse_origin_transform_ptr, transform_size);
-  CudaCheckErrors("Failed to allocate device grid inverse origin transform");
-  cudaMemcpy(
-      device_tracking_grid_inverse_origin_transform_ptr,
-      inverse_grid_origin_transform, transform_size, cudaMemcpyHostToDevice);
-  CudaCheckErrors("Failed to memcpy the grid inverse origin transform");
-  // Prepare for raycasting
-  const int32_t stride1 = num_y_cells * num_z_cells;
-  const int32_t stride2 = num_z_cells;
-  // Call the CUDA kernel
-  const int32_t num_threads = 256;
-  const int32_t num_blocks = (num_points + (num_threads - 1)) / num_threads;
-  RaycastPoint<<<num_blocks, num_threads>>>(
-      device_points_ptr, num_points, device_pointcloud_origin_transform_ptr,
-      device_tracking_grid_inverse_origin_transform_ptr,
-      inverse_step_size, inverse_cell_size, num_x_cells, num_y_cells,
-      num_z_cells, stride1, stride2, device_tracking_grid_ptr);
-  // Free the device memory
-  cudaFree(device_pointcloud_origin_transform_ptr);
-  CudaCheckErrors("Failed to free device pointcloud origin transform");
-  cudaFree(device_tracking_grid_inverse_origin_transform_ptr);
-  CudaCheckErrors(
-      "Failed to free device tracking grid inverse origin tranform");
-}
-
-float* PrepareFilterGrid(const int64_t num_cells, const void* host_data_ptr)
-{
-  const size_t filter_grid_size = sizeof(float) * num_cells * 2;
-  float* device_filter_grid_ptr = nullptr;
-  cudaMalloc(&device_filter_grid_ptr, filter_grid_size);
-  CudaCheckErrors("Failed to allocate device filter grid");
-  cudaMemcpy(device_filter_grid_ptr, host_data_ptr, filter_grid_size,
-             cudaMemcpyHostToDevice);
-  CudaCheckErrors("Failed to memcpy the static environment to the device");
-  return device_filter_grid_ptr;
-}
-
-void FilterTrackingGrids(
-    const int64_t num_cells, const int32_t num_device_tracking_grids,
-    int32_t* const* device_tracking_grid_ptrs,
-    float* const device_filter_grid_ptr, const float percent_seen_free,
-    const int32_t outlier_points_threshold, const int32_t num_cameras_seen_free)
-{
-  const size_t device_tracking_grid_ptrs_size =
-      sizeof(int32_t*) * num_device_tracking_grids;
-  int32_t** device_tracking_grid_ptrs_ptr = nullptr;
-  cudaMalloc(&device_tracking_grid_ptrs_ptr, device_tracking_grid_ptrs_size);
-  CudaCheckErrors("Failed to allocate device tracking grid ptr storage");
-  cudaMemcpy(device_tracking_grid_ptrs_ptr, device_tracking_grid_ptrs,
-             device_tracking_grid_ptrs_size, cudaMemcpyHostToDevice);
-  CudaCheckErrors("Failed to memcpy the device tracking grid ptrs to device");
-  // Call the CUDA kernel
-  const int32_t num_threads = 256;
-  const int32_t num_blocks = (num_cells + (num_threads - 1)) / num_threads;
-  FilterGrids<<<num_blocks, num_threads>>>(
-      num_cells, num_device_tracking_grids, device_tracking_grid_ptrs_ptr,
-      device_filter_grid_ptr, percent_seen_free, outlier_points_threshold,
-      num_cameras_seen_free);
-  // Free the device memory
-  cudaFree(device_tracking_grid_ptrs_ptr);
-  CudaCheckErrors("Failed to free device tracking grid ptr storage");
-}
-
-void RetrieveTrackingGrid(
-    const int64_t num_cells, const int32_t* const device_tracking_grid_ptr,
-    void* host_data_ptr)
-{
-  // Wait for GPU to finish before accessing on host
-  cudaDeviceSynchronize();
-  const size_t tracking_grid_size = sizeof(int32_t) * num_cells * 2;
-  cudaMemcpy(host_data_ptr, device_tracking_grid_ptr, tracking_grid_size,
-             cudaMemcpyDeviceToHost);
-  CudaCheckErrors("Failed to memcpy the tracking grid back to the host");
-}
-
-void RetrieveFilteredGrid(
-    const int64_t num_cells, const float* const device_filter_grid_ptr,
-    void* host_data_ptr)
-{
-  // Wait for GPU to finish before accessing on host
-  cudaDeviceSynchronize();
-  const size_t filter_grid_size = sizeof(float) * num_cells * 2;
-  cudaMemcpy(host_data_ptr, device_filter_grid_ptr, filter_grid_size,
-             cudaMemcpyDeviceToHost);
-  CudaCheckErrors("Failed to memcpy the filter grid back to the host");
-}
-
-void CleanupDeviceMemory(
-    const int32_t num_device_pointclouds, float* const* device_pointcloud_ptrs,
-    const int32_t num_device_tracking_grids,
-    int32_t* const* device_tracking_grid_ptrs, float* device_filter_grid_ptr)
-{
-  for (int32_t idx = 0; idx < num_device_pointclouds; idx++)
+  auto found_itr = options.find(option);
+  if (found_itr != options.end())
   {
-    auto device_pointcloud_ptr = device_pointcloud_ptrs[idx];
-    cudaFree(device_pointcloud_ptr);
-    CudaCheckErrors("Failed to free device points");
+    const int32_t value = found_itr->second;
+    std::cout << "Option [" << option << "] found with value [" << value << "]"
+              << std::endl;
+    return value;
   }
-  for (int32_t idx = 0; idx < num_device_tracking_grids; idx++)
+  else
   {
-    auto device_tracking_grid_ptr = device_tracking_grid_ptrs[idx];
+    std::cout << "Option [" << option << "] not found, default ["
+              << default_value << "]" << std::endl;
+    return default_value;
+  }
+}
+
+class RealCudaVoxelizationHelperInterface
+    : public CudaVoxelizationHelperInterface
+{
+public:
+  RealCudaVoxelizationHelperInterface(
+      const std::map<std::string, int32_t>& options)
+  {
+    const int32_t cuda_device =
+        RetrieveOptionOrDefault(options, "CUDA_DEVICE", 0);
+    int32_t device_count = 0;
+    cudaGetDeviceCount(&device_count);
+    CudaCheckErrors("Failed to get number of available CUDA devices");
+    if (cuda_device >= 0 && cuda_device < device_count)
+    {
+      cuda_device_num_ = cuda_device;
+      SetCudaDevice();
+    }
+    else
+    {
+      std::cerr << "CUDA_DEVICE = " << cuda_device << " out of range for "
+                << device_count << " devices" << std::endl;
+      cuda_device_num_ = -1;
+    }
+  }
+
+  ~RealCudaVoxelizationHelperInterface() override
+  {
+    CleanupAllocatedMemory();
+  }
+
+  bool IsAvailable() const override { return (cuda_device_num_ >= 0); }
+
+  std::vector<int64_t> PrepareTrackingGrids(
+      const int64_t num_cells, const int32_t num_grids) override
+  {
+    CleanupTrackingGridsMemory();
+    const size_t tracking_grids_size =
+        sizeof(int32_t) * 2 * num_cells * num_grids;
+    cudaMalloc(&device_tracking_grids_ptr_, tracking_grids_size);
+    CudaCheckErrors("Failed to allocate device tracking grids");
+    cudaMemset(device_tracking_grids_ptr_, 0, tracking_grids_size);
+    CudaCheckErrors("Failed to zero device tracking grids");
+    std::vector<int64_t> tracking_grid_offsets(num_grids, 0);
+    for (int32_t num_grid = 0; num_grid < num_grids; num_grid++)
+    {
+      tracking_grid_offsets.at(num_grid) = num_grid * num_cells * 2;
+    }
+    return tracking_grid_offsets;
+  }
+
+  void RaycastPoints(
+      const std::vector<float>& raw_points,
+      const float* const pointcloud_origin_transform,
+      const float* const inverse_grid_origin_transform,
+      const float inverse_step_size, const float inverse_cell_size,
+      const int32_t num_x_cells, const int32_t num_y_cells,
+      const int32_t num_z_cells,
+      const int64_t tracking_grid_starting_offset) override
+  {
+    SetCudaDevice();
+    const int32_t num_points = raw_points.size() / 3;
+    // Copy the points
+    const size_t points_size = sizeof(float) * raw_points.size();
+    float* device_points_ptr = nullptr;
+    cudaMalloc(&device_points_ptr, points_size);
+    CudaCheckErrors("Failed to allocate device points");
+    cudaMemcpy(device_points_ptr, raw_points.data(), points_size,
+               cudaMemcpyHostToDevice);
+    CudaCheckErrors("Failed to memcpy the points to the device");
+    // Copy pointcloud origin transform
+    const size_t transform_size = sizeof(float) * 16;
+    float* device_pointcloud_origin_transform_ptr = nullptr;
+    cudaMalloc(&device_pointcloud_origin_transform_ptr, transform_size);
+    CudaCheckErrors("Failed to allocate device pointcloud origin transform");
+    cudaMemcpy(
+        device_pointcloud_origin_transform_ptr, pointcloud_origin_transform,
+        transform_size, cudaMemcpyHostToDevice);
+    CudaCheckErrors("Failed to memcpy the pointcloud origin transform");
+    // Copy grid inverse origin transform
+    float* device_tracking_grid_inverse_origin_transform_ptr = nullptr;
+    cudaMalloc(
+        &device_tracking_grid_inverse_origin_transform_ptr, transform_size);
+    CudaCheckErrors("Failed to allocate device grid inverse origin transform");
+    cudaMemcpy(
+        device_tracking_grid_inverse_origin_transform_ptr,
+        inverse_grid_origin_transform, transform_size, cudaMemcpyHostToDevice);
+    CudaCheckErrors("Failed to memcpy the grid inverse origin transform");
+    // Prepare for raycasting
+    const int32_t stride1 = num_y_cells * num_z_cells;
+    const int32_t stride2 = num_z_cells;
+    // Call the CUDA kernel
+    const int32_t num_threads = 256;
+    const int32_t num_blocks = (num_points + (num_threads - 1)) / num_threads;
+    int32_t* const device_tracking_grid_ptr =
+        device_tracking_grids_ptr_ + tracking_grid_starting_offset;
+    RaycastPoint<<<num_blocks, num_threads>>>(
+        device_points_ptr, num_points, device_pointcloud_origin_transform_ptr,
+        device_tracking_grid_inverse_origin_transform_ptr,
+        inverse_step_size, inverse_cell_size, num_x_cells, num_y_cells,
+        num_z_cells, stride1, stride2, device_tracking_grid_ptr);
     // Free the device memory
-    cudaFree(device_tracking_grid_ptr);
-    CudaCheckErrors("Failed to free device tracking grid");
+    cudaFree(device_points_ptr);
+    CudaCheckErrors("Failed to free device points");
+    cudaFree(device_pointcloud_origin_transform_ptr);
+    CudaCheckErrors("Failed to free device pointcloud origin transform");
+    cudaFree(device_tracking_grid_inverse_origin_transform_ptr);
+    CudaCheckErrors(
+        "Failed to free device tracking grid inverse origin tranform");
   }
-  // Free the device memory
-  cudaFree(device_filter_grid_ptr);
-  CudaCheckErrors("Failed to free device filter grid");
+
+  void PrepareFilterGrid(
+       const int64_t num_cells, const void* host_data_ptr) override
+  {
+    CleanupFilterGridMemory();
+    const size_t filter_grid_size = sizeof(float) * num_cells * 2;
+    cudaMalloc(&device_filter_grid_ptr_, filter_grid_size);
+    CudaCheckErrors("Failed to allocate device filter grid");
+    cudaMemcpy(device_filter_grid_ptr_, host_data_ptr, filter_grid_size,
+               cudaMemcpyHostToDevice);
+    CudaCheckErrors("Failed to memcpy the static environment to the device");
+  }
+
+  void FilterTrackingGrids(
+       const int64_t num_cells, const int32_t num_grids,
+       const float percent_seen_free, const int32_t outlier_points_threshold,
+       const int32_t num_cameras_seen_free) override
+  {
+    // Call the CUDA kernel
+    const int32_t num_threads = 256;
+    const int32_t num_blocks = (num_cells + (num_threads - 1)) / num_threads;
+    FilterGrids<<<num_blocks, num_threads>>>(
+        num_cells, num_grids, device_tracking_grids_ptr_,
+        device_filter_grid_ptr_, percent_seen_free, outlier_points_threshold,
+        num_cameras_seen_free);
+  }
+
+  void RetrieveTrackingGrid(
+      const int64_t num_cells, const int64_t tracking_grid_starting_index,
+      void* host_data_ptr) override
+  {
+    // Wait for GPU to finish before accessing on host
+    cudaDeviceSynchronize();
+    const size_t tracking_grid_size = sizeof(int32_t) * num_cells * 2;
+    cudaMemcpy(host_data_ptr,
+               device_tracking_grids_ptr_ + tracking_grid_starting_index,
+               tracking_grid_size, cudaMemcpyDeviceToHost);
+    CudaCheckErrors("Failed to memcpy the tracking grid back to the host");
+  }
+
+  void RetrieveFilteredGrid(
+      const int64_t num_cells, void* host_data_ptr) override
+  {
+    // Wait for GPU to finish before accessing on host
+    cudaDeviceSynchronize();
+    const size_t filter_grid_size = sizeof(float) * num_cells * 2;
+    cudaMemcpy(host_data_ptr, device_filter_grid_ptr_, filter_grid_size,
+               cudaMemcpyDeviceToHost);
+    CudaCheckErrors("Failed to memcpy the filter grid back to the host");
+  }
+
+  void CleanupAllocatedMemory() override
+  {
+    CleanupTrackingGridsMemory();
+    CleanupFilterGridMemory();
+  }
+
+  void SetCudaDevice()
+  {
+    cudaSetDevice(cuda_device_num_);
+    CudaCheckErrors("Failed to set device");
+  }
+
+private:
+  void CleanupTrackingGridsMemory()
+  {
+    if (device_tracking_grids_ptr_ != nullptr)
+    {
+      cudaFree(device_tracking_grids_ptr_);
+      CudaCheckErrors("Failed to free device tracking grids");
+      device_tracking_grids_ptr_ = nullptr;
+    }
+  }
+
+  void CleanupFilterGridMemory()
+  {
+    if (device_filter_grid_ptr_ != nullptr)
+    {
+      cudaFree(device_filter_grid_ptr_);
+      CudaCheckErrors("Failed to free device filter grid");
+      device_filter_grid_ptr_ = nullptr;
+    }
+  }
+
+  int32_t cuda_device_num_ = -1;
+  int32_t* device_tracking_grids_ptr_ = nullptr;
+  float* device_filter_grid_ptr_ = nullptr;
+};
+
+CudaVoxelizationHelperInterface* MakeHelperInterface(
+    const std::map<std::string, int32_t>& options)
+{
+  return new RealCudaVoxelizationHelperInterface(options);
 }
 }  // namespace cuda_helpers
 }  // namespace pointcloud_voxelization
