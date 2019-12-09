@@ -239,14 +239,13 @@ class RealCudaVoxelizationHelperInterface
     : public CudaVoxelizationHelperInterface
 {
 public:
-  RealCudaVoxelizationHelperInterface(
+  explicit RealCudaVoxelizationHelperInterface(
       const std::map<std::string, int32_t>& options)
   {
     const int32_t cuda_device =
         RetrieveOptionOrDefault(options, "CUDA_DEVICE", 0);
     int32_t device_count = 0;
     cudaGetDeviceCount(&device_count);
-    CudaCheckErrors("Failed to get number of available CUDA devices");
     if (cuda_device >= 0 && cuda_device < device_count)
     {
       cuda_device_num_ = cuda_device;
