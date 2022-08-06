@@ -1,9 +1,5 @@
 #include <voxelized_geometry_tools/device_pointcloud_voxelization.hpp>
 
-#if defined(_OPENMP)
-#include <omp.h>
-#endif
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -13,6 +9,7 @@
 #include <vector>
 
 #include <Eigen/Geometry>
+#include <common_robotics_utilities/openmp_helpers.hpp>
 #include <voxelized_geometry_tools/collision_map.hpp>
 #include <voxelized_geometry_tools/cuda_voxelization_helpers.h>
 #include <voxelized_geometry_tools/opencl_voxelization_helpers.h>
@@ -66,9 +63,7 @@ VoxelizerRuntime DevicePointCloudVoxelizer::DoVoxelizePointClouds(
       static_cast<int32_t>(static_environment.GetNumZCells());
 
   // Do raycasting of the pointclouds
-#if defined(_OPENMP)
-#pragma omp parallel for
-#endif
+  CRU_OMP_PARALLEL_FOR
   for (size_t idx = 0; idx < pointclouds.size(); idx++)
   {
     const PointCloudWrapperSharedPtr& pointcloud = pointclouds.at(idx);
@@ -136,20 +131,22 @@ VoxelizerRuntime DevicePointCloudVoxelizer::DoVoxelizePointClouds(
 }
 
 CudaPointCloudVoxelizer::CudaPointCloudVoxelizer(
-    const std::map<std::string, int32_t>& options)
+    const std::map<std::string, int32_t>& options,
+    const LoggingFunction& logging_fn)
 {
   device_name_ = "CudaPointCloudVoxelizer";
   helper_interface_ = std::unique_ptr<DeviceVoxelizationHelperInterface>(
-      cuda_helpers::MakeCudaVoxelizationHelper(options));
+      cuda_helpers::MakeCudaVoxelizationHelper(options, logging_fn));
   EnforceAvailable();
 }
 
 OpenCLPointCloudVoxelizer::OpenCLPointCloudVoxelizer(
-    const std::map<std::string, int32_t>& options)
+    const std::map<std::string, int32_t>& options,
+    const LoggingFunction& logging_fn)
 {
   device_name_ = "OpenCLPointCloudVoxelizer";
   helper_interface_ = std::unique_ptr<DeviceVoxelizationHelperInterface>(
-      opencl_helpers::MakeOpenCLVoxelizationHelper(options));
+      opencl_helpers::MakeOpenCLVoxelizationHelper(options, logging_fn));
   EnforceAvailable();
 }
 }  // namespace pointcloud_voxelization
