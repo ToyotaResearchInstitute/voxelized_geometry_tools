@@ -18,6 +18,8 @@ namespace pointcloud_voxelization
 {
 namespace cuda_helpers
 {
+namespace
+{
 constexpr int32_t kDefaultThreadsPerBlock = 256;
 
 void CudaCheckErrors(const cudaError_t error, const std::string& msg)
@@ -448,7 +450,7 @@ public:
         dynamic_cast<CudaTrackingGridsHandle&>(tracking_grids);
 
     SetCudaDevice();
-    const int32_t num_points = raw_points.size() / 3;
+    const int32_t num_points = static_cast<int32_t>(raw_points.size() / 3);
 
     // Copy the points to the device
     const CudaBuffer<float> device_points(raw_points.size(), raw_points.data());
@@ -461,8 +463,8 @@ public:
     const int32_t stride1 = num_y_cells * num_z_cells;
     const int32_t stride2 = num_z_cells;
     // Call the CUDA kernel
-    const int32_t num_threads = 256;
-    const int32_t num_blocks = (num_points + (num_threads - 1)) / num_threads;
+    const int32_t num_threads = CudaThreadsPerBlock();
+    const int32_t num_blocks = CalcNumBlocks(num_points);
     const size_t starting_index =
         real_tracking_grids.GetTrackingGridStartingOffset(tracking_grid_index);
     int32_t* const device_tracking_grid_ptr =
@@ -496,9 +498,8 @@ public:
 
     // Call the CUDA kernel
     const int32_t num_threads = CudaThreadsPerBlock();
-    const int32_t num_blocks =
-        (real_tracking_grids.NumCellsPerGrid() + (num_threads - 1))
-        / num_threads;
+    const int32_t num_blocks = CalcNumBlocks(
+        static_cast<int32_t>(real_tracking_grids.NumCellsPerGrid()));
     FilterGrids<<<num_blocks, num_threads>>>(
         real_tracking_grids.NumCellsPerGrid(),
         static_cast<int32_t>(real_tracking_grids.GetNumTrackingGrids()),
@@ -557,11 +558,19 @@ public:
   }
 
 private:
+  int32_t CalcNumBlocks(const int32_t num_items) const
+  {
+    const int32_t num_threads = CudaThreadsPerBlock();
+    const int32_t num_blocks = (num_items + (num_threads - 1)) / num_threads;
+    return num_blocks;
+  }
+
   int32_t CudaThreadsPerBlock() const { return cuda_threads_per_block_; }
 
   int32_t cuda_threads_per_block_ = 0;
   int32_t cuda_device_num_ = -1;
 };
+}  // namespace
 
 std::vector<AvailableDevice> GetAvailableDevices()
 {
